@@ -56,8 +56,8 @@ th{background:#f0f3f9;position:sticky;top:0}
   .pcard svg{width:140px;height:140px}
 }
 /* v2 */
-.bigqr{background:#fff;display:inline-block;padding:12px;border-radius:14px;border:1px solid var(--line)}
-.bigqr svg{width:min(78vw,420px);height:auto;display:block}
+.bigqr{background:#fff;display:block;width:100%;max-width:444px;margin:0 auto;padding:12px;border-radius:14px;border:1px solid var(--line);box-sizing:border-box}
+.bigqr svg{width:100%;height:auto;display:block}
 .stu .big{font-size:22px;font-weight:700;margin:8px 0}
 .stu .res{border-radius:14px;padding:18px;margin:14px 0;border:1px solid var(--line)}
 .stu .res.ok{background:#e9f8f1;border-color:#b7e4d0}.stu .res.warn{background:#fff6e0;border-color:#f1d9a1}.stu .res.bad{background:#fdebe8;border-color:#f1b9b2}
