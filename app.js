@@ -25,7 +25,23 @@ function qrSvg(text, cell = 5) {
 }
 const getKey = () => store.sget('att_key') || store.get('att_key') || '';
 
-async function api(action, data = {}, teacher = false) {
+let pending = 0;
+function setBusy(d) {
+  pending += d;
+  let b = $('#busy');
+  if (!b) {
+    b = document.createElement('div'); b.id = 'busy';
+    b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#2457d6;color:#fff;text-align:center;padding:8px;font-size:15px;z-index:99;display:none';
+    b.textContent = '⏳ กำลังติดต่อ Google… (อาจใช้เวลา 2–5 วินาที กรุณาอย่ากดซ้ำ)';
+    document.body.appendChild(b);
+  }
+  b.style.display = pending > 0 ? 'block' : 'none';
+}
+async function api(action, data = {}, teacher = false, quiet = false) {
+  if (!quiet) setBusy(1);
+  try { return await apiRaw(action, data, teacher); } finally { if (!quiet) setBusy(-1); }
+}
+async function apiRaw(action, data = {}, teacher = false) {
   if (!CFG.API_URL || CFG.API_URL.indexOf('http') !== 0) throw new Error('ยังไม่ได้ตั้งค่า API_URL ในไฟล์ config.js');
   const body = { action, ...data }; if (teacher) body.key = getKey();
   let r;
@@ -173,12 +189,17 @@ function modal(html) {
   document.body.appendChild(o);
 }
 const stuLink = (cid, s) => `${baseUrl()}#/s/${encodeURIComponent(cid)}/${encodeURIComponent(s.studentId)}/${encodeURIComponent(s.secret)}`;
-async function act(fn) { try { await fn(); } catch (e) { if (e.auth) return handleErr(e); alert(e.message); } }
+let acting = false;
+async function act(fn) {
+  if (acting) return; // กำลังทำงานอยู่ ไม่รับการกดซ้ำ (กันสร้างห้อง/นักเรียนซ้ำ)
+  acting = true;
+  try { await fn(); } catch (e) { if (e.auth) return handleErr(e); alert(e.message); } finally { acting = false; }
+}
 
 // ----- ห้องเรียน/นักเรียน -----
 async function tabClass() {
   const cls = T.classes.find(c => c.classId === T.cid);
-  const studs = cls ? (await api('students', { classId: cls.classId }, true)).students : [];
+  const studs = cls && cls.count > 0 ? (await api('students', { classId: cls.classId }, true)).students : [];
   $('#main').innerHTML = `
   <div class="card"><h2>ห้องเรียน</h2><div class="row">
     <div><label>เลือกห้อง</label><select id="csel">${T.classes.map(c => `<option value="${esc(c.classId)}" ${c.classId === T.cid ? 'selected' : ''}>${esc(c.name)} (${c.count} คน)</option>`).join('') || '<option>— ยังไม่มีห้อง —</option>'}</select></div>
@@ -198,9 +219,9 @@ async function tabClass() {
     <div class="auto"><button class="btn sec" id="printall">พิมพ์บัตร QR ลิงก์ทุกคน</button></div></div>
     <div class="warnbox">⚠ ลิงก์ส่วนตัวเป็นความลับ ให้ส่งตรงถึงนักเรียนคนนั้นเท่านั้น และให้เปิดในมือถือของตัวเองเครื่องเดียว (เปิดครั้งแรกจะผูกเครื่องทันที)</div></div>` : ''}`;
   $('#csel').onchange = e => { T.cid = e.target.value; render(); };
-  $('#cadd').onclick = () => act(async () => { const n = $('#cname').value.trim(); if (!n) return; const j = await api('addClass', { name: n }, true); T.cid = j.classId; await loadClasses(); render(); });
+  $('#cadd').onclick = () => act(async () => { const n = $('#cname').value.trim(); if (!n) return; const j = await api('addClass', { name: n }, true); T.classes.push({ classId: j.classId, name: n, count: 0 }); T.cid = j.classId; render(); });
   if (!cls) return;
-  $('#impbtn').onclick = () => act(async () => { const j = await api('addStudents', { classId: cls.classId, lines: $('#imp').value }, true); await loadClasses(); render(); alert(j.added ? `เพิ่ม ${j.added} คน` : 'ไม่มีรายการใหม่ (ตรวจรูปแบบ/รหัสซ้ำ)'); });
+  $('#impbtn').onclick = () => act(async () => { const j = await api('addStudents', { classId: cls.classId, lines: $('#imp').value }, true); cls.count += j.added; render(); alert(j.added ? `เพิ่ม ${j.added} คน` : 'ไม่มีรายการใหม่ (ตรวจรูปแบบ/รหัสซ้ำ)'); });
   $('#printall').onclick = () => {
     $('#printArea').innerHTML = studs.map(s => `<div class="pcard">${qrSvg(stuLink(cls.classId, s), 4)}<b>${esc(s.name)}</b><br>${esc(s.studentId)}<br>สแกนเพื่อลงทะเบียนมือถือ (ห้ามแชร์)</div>`).join('');
     print(); $('#printArea').innerHTML = '';
@@ -209,7 +230,7 @@ async function tabClass() {
   document.querySelectorAll('[data-link]').forEach(b => b.onclick = () => { const s = byId(b.dataset.link), l = stuLink(cls.classId, s); modal(`<h2>${esc(s.name)}</h2>${qrSvg(l, 5)}<p class="muted">ให้นักเรียนสแกนด้วยมือถือตัวเอง หรือส่งลิงก์นี้ให้เฉพาะคนนี้</p><input readonly value="${esc(l)}" onclick="this.select()">`); });
   document.querySelectorAll('[data-rd]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rd); if (confirm(`รีเซ็ตเครื่องที่ผูกของ ${s.name}?`)) act(async () => { await api('resetDevice', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
   document.querySelectorAll('[data-rs]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rs); if (confirm(`สร้างรหัสลับใหม่ให้ ${s.name}? ลิงก์เดิมจะใช้ไม่ได้ทันที`)) act(async () => { await api('newSecret', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
-  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const s = byId(b.dataset.del); if (confirm(`ลบ ${s.name}?`)) act(async () => { await api('delStudent', { classId: cls.classId, studentId: s.studentId }, true); await loadClasses(); render(); }); });
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const s = byId(b.dataset.del); if (confirm(`ลบ ${s.name}?`)) act(async () => { await api('delStudent', { classId: cls.classId, studentId: s.studentId }, true); cls.count = Math.max(0, cls.count - 1); render(); }); });
 }
 
 // ----- เช็คชื่อ -----
@@ -262,7 +283,7 @@ async function liveView(sid) {
     const done = new Set(j.records.map(r => r.studentId)), rest = j.roster.filter(x => !done.has(x.id)), ns = rest.map(x => x.id).join(',');
     if (ns !== sig) { sig = ns; const cur = $('#mst').value; $('#mst').innerHTML = rest.map(x => `<option value="${esc(x.id)}">${esc(x.id)} ${esc(x.name)}</option>`).join(''); if (rest.some(x => x.id === cur)) $('#mst').value = cur; }
   };
-  const poll = async () => { try { update(await api('poll', { sessionId: sid }, true)); } catch (e) { if (e.auth) return handleErr(e); const m = $('#ttl'); if (m) m.innerHTML += ` <span class="badge bad">เชื่อมต่อขัดข้อง: ${esc(e.message)}</span>`; } };
+  const poll = async () => { try { update(await api('poll', { sessionId: sid }, true, true)); } catch (e) { if (e.auth) return handleErr(e); const m = $('#ttl'); if (m) m.innerHTML += ` <span class="badge bad">เชื่อมต่อขัดข้อง: ${esc(e.message)}</span>`; } };
   await poll();
   T.timer = setInterval(poll, 3000);
   T.tick = setInterval(() => { const l = Math.max(0, left - (Date.now() - t0) / 1000), b = $('#bar'); if (b) b.style.width = (l / win * 100) + '%'; }, 250);
