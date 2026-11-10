@@ -1,5 +1,5 @@
 'use strict';
-/* ระบบเช็คชื่อ QR — หน้าเว็บ (ครู + นักเรียน) ใช้ Google Apps Script เป็น backend
+/* ระบบเช็คชื่อ QR — หน้าเว็บ (ครู + นักเรียน) ใช้ Supabase (PostgreSQL) เป็น backend
  * ครู:     เปิดหน้าเว็บปกติ แล้วกรอกรหัสผ่านครู
  * นักเรียน: เปิดลิงก์ส่วนตัว  #/s/<ห้อง>/<รหัส>/<รหัสลับ>  (ครั้งแรกครั้งเดียว) แล้วกดสแกน QR
  */
@@ -32,7 +32,7 @@ function setBusy(d) {
   if (!b) {
     b = document.createElement('div'); b.id = 'busy';
     b.style.cssText = 'position:fixed;top:0;left:0;right:0;background:#2457d6;color:#fff;text-align:center;padding:8px;font-size:15px;z-index:99;display:none';
-    b.textContent = '⏳ กำลังติดต่อ Google… (อาจใช้เวลา 2–5 วินาที กรุณาอย่ากดซ้ำ)';
+    b.textContent = '⏳ กำลังติดต่อเซิร์ฟเวอร์… กรุณาอย่ากดซ้ำ';
     document.body.appendChild(b);
   }
   b.style.display = pending > 0 ? 'block' : 'none';
@@ -42,22 +42,29 @@ async function api(action, data = {}, teacher = false, quiet = false) {
   try { return await apiRaw(action, data, teacher); } finally { if (!quiet) setBusy(-1); }
 }
 async function apiRaw(action, data = {}, teacher = false) {
-  if (!CFG.API_URL || CFG.API_URL.indexOf('http') !== 0) throw new Error('ยังไม่ได้ตั้งค่า API_URL ในไฟล์ config.js');
+  if (!CFG.SUPABASE_URL || CFG.SUPABASE_URL.indexOf('http') !== 0 || !CFG.SUPABASE_KEY || CFG.SUPABASE_KEY.indexOf('วาง') >= 0)
+    throw new Error('ยังไม่ได้ตั้งค่า SUPABASE_URL และ SUPABASE_KEY ในไฟล์ config.js');
   const body = { action, ...data }; if (teacher) body.key = getKey();
+  const headers = { 'Content-Type': 'application/json', apikey: CFG.SUPABASE_KEY };
+  if (CFG.SUPABASE_KEY.indexOf('eyJ') === 0) headers.Authorization = 'Bearer ' + CFG.SUPABASE_KEY; // key แบบ JWT เดิม
   let r;
-  try { r = await fetch(CFG.API_URL, { method: 'POST', body: JSON.stringify(body) }); }
-  catch { throw new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองใหม่'); }
+  try { r = await fetch(CFG.SUPABASE_URL.replace(/\/+$/, '') + '/rest/v1/rpc/api', { method: 'POST', headers, body: JSON.stringify({ req: body }) }); }
+  catch { throw Object.assign(new Error('เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ ตรวจอินเทอร์เน็ตแล้วลองใหม่'), { retry: true }); }
   let j;
-  try { j = await r.json(); } catch { throw new Error('เซิร์ฟเวอร์ตอบกลับผิดรูปแบบ (ตรวจว่า Deploy เป็น Anyone และใช้ URL ที่ลงท้าย /exec)'); }
-  if (!j.ok) { const e = new Error(j.error || 'เกิดข้อผิดพลาด'); e.auth = !!j.auth; throw e; }
+  try { j = await r.json(); } catch { throw Object.assign(new Error('เซิร์ฟเวอร์ตอบกลับผิดรูปแบบ (HTTP ' + r.status + ')'), { retry: r.status >= 500 }); }
+  if (!j || j.ok !== true) {
+    let msg = (j && (j.error || j.message)) || 'เกิดข้อผิดพลาด';
+    if (j && j.code === 'PGRST202') msg = 'ยังไม่ได้รันไฟล์ setup.sql ใน Supabase (ดูขั้นตอนใน README)';
+    const e = new Error(msg); e.auth = !!(j && j.auth); e.retry = !!(j && j.retry) || r.status >= 500 || r.status === 429; throw e;
+  }
   return j;
 }
-function getPos() {
+function getPos(hi = false) { // hi=true สำหรับครูตอนตั้งจุดห้อง; นักเรียนใช้แบบเร็ว (ยอมใช้ตำแหน่งที่เพิ่งอ่านไว้)
   return new Promise(res => {
     if (!navigator.geolocation) return res(null);
     navigator.geolocation.getCurrentPosition(
       p => res({ lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }),
-      () => res(null), { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+      () => res(null), { enableHighAccuracy: hi, timeout: hi ? 10000 : 6000, maximumAge: hi ? 0 : 60000 });
   });
 }
 function startScanner(video, onText) {
@@ -110,7 +117,9 @@ function meView(token) {
   $('#scan').onclick = openScanner;
   if (token) { history.replaceState(null, '', location.pathname + '#/me'); doCheckin(token); }
 }
+let posP = null; // อ่านตำแหน่งล่วงหน้าตั้งแต่เปิดกล้อง จะได้ไม่ต้องรอหลังสแกน
 function openScanner() {
+  posP = getPos();
   $('#box').innerHTML = '<video id="v" playsinline muted></video><p class="muted" id="hint">เล็งกล้องไปที่ QR บนจอ</p><button class="btn sec" id="cancel">ยกเลิก</button>';
   let busy = false, stop;
   stop = startScanner($('#v'), (text, err) => {
@@ -130,13 +139,23 @@ async function doCheckin(token) {
   const me = getMe();
   if (!me) return meView();
   showResult('warn', 'กำลังตรวจตำแหน่ง…');
-  const pos = await getPos();
+  const pos = await (posP || getPos());
+  posP = null;
   showResult('warn', 'กำลังบันทึก…');
-  try {
-    const j = await api('checkin', { token, classId: me.classId, studentId: me.studentId, secret: me.secret, dev: getDev(), lat: pos ? pos.lat : undefined, lng: pos ? pos.lng : undefined, acc: pos ? pos.acc : undefined });
-    const st = j.status === 'late' ? 'สาย' : j.status === 'leave' ? 'ลา' : 'มา';
-    showResult(j.status === 'late' ? 'warn' : 'ok', j.already ? '✓ คุณเช็คชื่อไปแล้ว' : '✓ เช็คชื่อสำเร็จ', `${j.name} · ${st} · ${timeStr(j.ts)}`);
-  } catch (e) { showResult('bad', '✗ เช็คชื่อไม่สำเร็จ', e.message); }
+  const payload = { token, classId: me.classId, studentId: me.studentId, secret: me.secret, dev: getDev(), lat: pos ? pos.lat : undefined, lng: pos ? pos.lng : undefined, acc: pos ? pos.acc : undefined };
+  let lastErr;
+  for (let i = 0; i < 3; i++) { // เซิร์ฟเวอร์คิวหนัก/เน็ตสะดุด: ลองใหม่อัตโนมัติสูงสุด 3 ครั้ง
+    try {
+      const j = await api('checkin', payload);
+      const st = j.status === 'late' ? 'สาย' : j.status === 'leave' ? 'ลา' : 'มา';
+      return showResult(j.status === 'late' ? 'warn' : 'ok', j.already ? '✓ คุณเช็คชื่อไปแล้ว' : '✓ เช็คชื่อสำเร็จ', `${j.name} · ${st} · ${timeStr(j.ts)}`);
+    } catch (e) {
+      lastErr = e; if (!e.retry) break;
+      showResult('warn', 'เซิร์ฟเวอร์กำลังคิวงานหนัก กำลังลองใหม่…', 'กรุณารอสักครู่ อย่าปิดหน้านี้');
+      await new Promise(r => setTimeout(r, 1500 + Math.random() * 2500));
+    }
+  }
+  showResult('bad', '✗ เช็คชื่อไม่สำเร็จ', lastErr.message + (lastErr.retry ? ' — กรุณากดสแกนใหม่อีกครั้ง' : ''));
 }
 
 // =====================================================================
@@ -151,7 +170,7 @@ async function teacherApp() {
 }
 function loginView(msg = '') {
   app.innerHTML = `<div class="card narrow"><h1>ระบบเช็คชื่อ QR Code</h1>
-    <p class="muted">สำหรับครู — กรอกรหัสผ่านที่ตั้งไว้ใน Code.gs</p>
+    <p class="muted">สำหรับครู — กรอกรหัสผ่านครูที่ตั้งไว้ตอนติดตั้ง</p>
     <form id="f"><label>รหัสผ่านครู</label><input type="password" name="pw" required autocomplete="current-password">
     <label style="font-weight:400"><input type="checkbox" name="rem" style="width:auto"> จำไว้ในเครื่องนี้</label>
     <p class="err" id="e">${esc(msg)}</p><button class="btn" style="width:100%">เข้าสู่ระบบ</button></form></div>`;
@@ -249,7 +268,7 @@ async function tabCheck() {
     const data = { classId, lateMin: +$('#late').value || 0 };
     if ($('#gps').checked) {
       $('#go').textContent = 'กำลังอ่านตำแหน่ง…';
-      const p = await getPos(); if (!p) { $('#go').textContent = 'เริ่มเช็คชื่อ'; return alert('อ่านตำแหน่งครูไม่ได้ ตรวจสิทธิ์ตำแหน่งของเบราว์เซอร์ หรือปิดตัวเลือก GPS'); }
+      const p = await getPos(true); if (!p) { $('#go').textContent = 'เริ่มเช็คชื่อ'; return alert('อ่านตำแหน่งครูไม่ได้ ตรวจสิทธิ์ตำแหน่งของเบราว์เซอร์ หรือปิดตัวเลือก GPS'); }
       Object.assign(data, { lat: p.lat, lng: p.lng, radius: +$('#rad').value || 150 });
     }
     const j = await api('start', data, true); store.set('att_sid', j.sessionId); T.cid = classId; render();
@@ -259,7 +278,7 @@ async function liveView(sid) {
   $('#main').innerHTML = `
   <div class="card"><h2 id="ttl">กำลังเช็คชื่อ…</h2>
     <div class="row" style="align-items:flex-start">
-      <div style="flex:1 1 360px;text-align:center"><div class="bigqr" id="qr"></div>
+      <div style="flex:1 1 360px;min-width:0;text-align:center"><div class="bigqr" id="qr"></div>
         <div class="bar"><i id="bar" style="width:100%"></i></div><p class="muted">ฉายหน้าจอนี้ให้นักเรียนสแกน · QR เปลี่ยนทุก 20 วินาที</p></div>
       <div style="flex:1 1 300px"><div class="stats" id="stats"></div>
         <h2>การสแกนที่ถูกปฏิเสธ</h2><div id="rej" class="muted">—</div>
@@ -312,7 +331,7 @@ async function tabReport() {
     const col = c => c === 'มา' ? 'ok' : c === 'สาย' ? 'warn' : c === 'ขาด' ? 'bad' : '';
     $('#rout').innerHTML = `<div class="tscroll"><table><thead><tr><th>รหัส</th><th>ชื่อ</th>${t.sessions.map(s => `<th>${esc(s.date)}<br><span class="badge ${s.ok ? 'ok' : 'bad'}">${s.ok ? 'ข้อมูลครบถ้วน' : 'ถูกแก้ไข!'}</span></th>`).join('')}<th>%</th></tr></thead>
       <tbody>${t.rows.map(r => `<tr><td>${esc(r.id)}</td><td>${esc(r.name)}</td>${r.cells.map(c => `<td><span class="badge ${col(c)}">${c}</span></td>`).join('')}<td><b>${r.pct}%</b></td></tr>`).join('')}</tbody></table></div>
-      <p class="muted">“ข้อมูลครบถ้วน” = ตรวจ hash chain (ลงลายเซ็นด้วยกุญแจเซิร์ฟเวอร์) แล้วไม่พบการแก้/ลบ/แทรกรายการ · อย่าเรียงลำดับหรือแก้ชีต Records ด้วยมือ</p>`;
+      <p class="muted">“ข้อมูลครบถ้วน” = ตรวจ hash chain (ลงลายเซ็นด้วยกุญแจเซิร์ฟเวอร์) แล้วไม่พบการแก้/ลบ/แทรกรายการ · อย่าแก้ตาราง records ในฐานข้อมูลด้วยมือ</p>`;
     $('#rcsv').disabled = false;
   });
   $('#rcsv').onclick = () => {
