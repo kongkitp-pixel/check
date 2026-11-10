@@ -384,7 +384,7 @@ async function liveView(sid) {
     const done = new Set(j.records.map(r => r.studentId)), rest = j.roster.filter(x => !done.has(x.id)), ns = rest.map(x => x.id).join(',');
     if (ns !== sig) { sig = ns; const cur = $('#mst').value; $('#mst').innerHTML = rest.map(x => `<option value="${esc(x.id)}">${esc(x.id)} ${esc(x.name)}</option>`).join(''); if (rest.some(x => x.id === cur)) $('#mst').value = cur; }
   };
-  const poll = async () => { try { update(await api('poll', { sessionId: sid }, true, true)); } catch (e) { if (e.auth) return handleErr(e); const m = $('#ttl'); if (m) m.innerHTML += ` <span class="badge bad">เชื่อมต่อขัดข้อง: ${esc(e.message)}</span>`; } };
+  const poll = async () => { try { update(await api('poll', { sessionId: sid }, true, true)); } catch (e) { if (e.auth) return handleErr(e); if (/ไม่พบรอบ/.test(e.message)) { store.del('att_sid'); return render(); } const m = $('#ttl'); if (m) m.innerHTML += ` <span class="badge bad">เชื่อมต่อขัดข้อง: ${esc(e.message)}</span>`; } };
   await poll();
   T.timer = setInterval(poll, 3000);
   T.tick = setInterval(() => { const l = Math.max(0, left - (Date.now() - t0) / 1000), b = $('#bar'); if (b) b.style.width = (l / win * 100) + '%'; }, 250);
