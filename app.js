@@ -74,6 +74,7 @@ async function makeZip(files) { // files: [{name, blob}]
   e.setUint32(12, csize, true); e.setUint32(16, off, true);
   return new Blob([...parts, ...central, e.buffer], { type: 'application/zip' });
 }
+const SUBJECTS = ['การลงทุน', 'เพื่ออาชีพ']; // วิชาที่ใช้บ่อย (พิมพ์ชื่ออื่นเองได้)
 const getKey = () => store.sget('att_key') || store.get('att_key') || '';
 
 let pending = 0;
@@ -336,6 +337,7 @@ async function tabCheck() {
   if (sid) return liveView(sid);
   $('#main').innerHTML = `<div class="card"><h2>เริ่มรอบเช็คชื่อใหม่</h2>
     <div class="row"><div><label>ห้อง</label><select id="scls">${T.classes.map(c => `<option value="${esc(c.classId)}" ${c.classId === T.cid ? 'selected' : ''}>${esc(c.name)} (${c.count} คน)</option>`).join('')}</select></div>
+    <div><label>วิชา</label><input id="subj" list="subjlist" placeholder="เลือกหรือพิมพ์ชื่อวิชา" value="${esc(store.get('att_subj') || '')}" autocomplete="off"><datalist id="subjlist">${SUBJECTS.map(x => `<option value="${esc(x)}">`).join('')}</datalist></div>
     <div><label>นับเป็น “สาย” หลังจากกี่นาที</label><input id="late" type="number" min="0" value="10"></div></div>
     <label style="font-weight:400"><input type="checkbox" id="gps" style="width:auto" checked> ตรวจตำแหน่ง GPS ของนักเรียน (ใช้ตำแหน่งของครูตอนนี้เป็นจุดห้องเรียน)</label>
     <div><label>รัศมีที่ยอมรับ (เมตร)</label><input id="rad" type="number" min="20" value="150"></div>
@@ -343,7 +345,9 @@ async function tabCheck() {
     <p><button class="btn" id="go">เริ่มเช็คชื่อ</button></p></div>`;
   $('#go').onclick = () => act(async () => {
     const classId = $('#scls').value; if (!classId) return alert('ยังไม่มีห้อง');
-    const data = { classId, lateMin: +$('#late').value || 0 };
+    const subject = $('#subj').value.trim(); if (!subject) return alert('กรุณาเลือกหรือพิมพ์ชื่อวิชาก่อน');
+    store.set('att_subj', subject);
+    const data = { classId, subject, lateMin: +$('#late').value || 0 };
     if ($('#gps').checked) {
       $('#go').textContent = 'กำลังอ่านตำแหน่ง…';
       const p = await getPos(true); if (!p) { $('#go').textContent = 'เริ่มเช็คชื่อ'; return alert('อ่านตำแหน่งครูไม่ได้ ตรวจสิทธิ์ตำแหน่งของเบราว์เซอร์ หรือปิดตัวเลือก GPS'); }
@@ -370,7 +374,7 @@ async function liveView(sid) {
   const lab = { present: ['มา', 'ok'], late: ['สาย', 'warn'], leave: ['ลา', ''] };
   const update = j => {
     if (j.status !== 'open') { store.del('att_sid'); T.tab = 'report'; return render(); }
-    $('#ttl').innerHTML = `${esc(j.className)} <span class="badge ok">เปิดอยู่</span> <span class="muted">เริ่ม ${timeStr(j.start)} · สายหลัง ${j.lateMin} นาที · GPS ${j.gps ? 'เปิด' : 'ปิด'}</span>`;
+    $('#ttl').innerHTML = `${esc(j.className)}${j.subject ? ' · ' + esc(j.subject) : ''} <span class="badge ok">เปิดอยู่</span> <span class="muted">เริ่ม ${timeStr(j.start)} · สายหลัง ${j.lateMin} นาที · GPS ${j.gps ? 'เปิด' : 'ปิด'}</span>`;
     if (j.token !== lastToken) { lastToken = j.token; $('#qr').innerHTML = qrSvg(`${baseUrl()}#/c/${j.token}`, 5); }
     left = j.secondsLeft; win = j.windowSec; t0 = Date.now();
     const c = k => j.records.filter(r => r.status === k).length;
@@ -399,22 +403,26 @@ async function liveView(sid) {
 async function tabReport() {
   $('#main').innerHTML = `<div class="card"><h2>รายงานการเข้าเรียน</h2>
     <div class="row"><div><label>ห้อง</label><select id="rcls">${T.classes.map(c => `<option value="${esc(c.classId)}" ${c.classId === T.cid ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+    <div><label>วิชา</label><select id="rsub"><option value="">ทุกวิชา</option>${SUBJECTS.map(x => `<option>${esc(x)}</option>`).join('')}</select></div>
     <div class="auto"><button class="btn" id="rload">โหลดรายงาน</button></div><div class="auto"><button class="btn sec" id="rcsv" disabled>ส่งออก CSV</button></div></div>
     <div id="rout" class="muted" style="margin-top:12px">กด “โหลดรายงาน”</div></div>`;
   let t = null;
   $('#rload').onclick = () => act(async () => {
     T.cid = $('#rcls').value; $('#rout').textContent = 'กำลังโหลด…';
-    t = await api('report', { classId: T.cid }, true);
+    const want = $('#rsub').value;
+    t = await api('report', { classId: T.cid, subject: want }, true);
+    const subs = [...new Set([...SUBJECTS, ...(t.subjects || [])])];
+    $('#rsub').innerHTML = `<option value="">ทุกวิชา</option>` + subs.map(x => `<option ${x === want ? 'selected' : ''}>${esc(x)}</option>`).join('');
     if (!t.sessions.length) { $('#rout').textContent = 'ยังไม่มีข้อมูลการเช็คชื่อของห้องนี้'; return; }
     const col = c => c === 'มา' ? 'ok' : c === 'สาย' ? 'warn' : c === 'ขาด' ? 'bad' : '';
-    $('#rout').innerHTML = `<div class="tscroll"><table><thead><tr><th>รหัส</th><th>ชื่อ</th>${t.sessions.map(s => `<th>${esc(s.date)}<br><span class="badge ${s.ok ? 'ok' : 'bad'}">${s.ok ? 'ข้อมูลครบถ้วน' : 'ถูกแก้ไข!'}</span></th>`).join('')}<th>%</th></tr></thead>
+    $('#rout').innerHTML = `<div class="tscroll"><table><thead><tr><th>รหัส</th><th>ชื่อ</th>${t.sessions.map(s => `<th>${esc(s.date)}${s.subject ? '<br>' + esc(s.subject) : ''}<br><span class="badge ${s.ok ? 'ok' : 'bad'}">${s.ok ? 'ข้อมูลครบถ้วน' : 'ถูกแก้ไข!'}</span></th>`).join('')}<th>%</th></tr></thead>
       <tbody>${t.rows.map(r => `<tr><td>${esc(r.id)}</td><td>${esc(r.name)}</td>${r.cells.map(c => `<td><span class="badge ${col(c)}">${c}</span></td>`).join('')}<td><b>${r.pct}%</b></td></tr>`).join('')}</tbody></table></div>
       <p class="muted">“ข้อมูลครบถ้วน” = ตรวจ hash chain (ลงลายเซ็นด้วยกุญแจเซิร์ฟเวอร์) แล้วไม่พบการแก้/ลบ/แทรกรายการ · อย่าแก้ตาราง records ในฐานข้อมูลด้วยมือ</p>`;
     $('#rcsv').disabled = false;
   });
   $('#rcsv').onclick = () => {
     const q = v => `"${String(v).replace(/"/g, '""')}"`;
-    const lines = [['รหัส', 'ชื่อ', ...t.sessions.map(s => s.date + '_' + s.id), '% เข้าเรียน'].map(q).join(',')];
+    const lines = [['รหัส', 'ชื่อ', ...t.sessions.map(s => s.date + (s.subject ? ' ' + s.subject : '') + '_' + s.id), '% เข้าเรียน'].map(q).join(',')];
     t.rows.forEach(r => lines.push([r.id, r.name, ...r.cells, r.pct].map(q).join(',')));
     const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
     a.download = `attendance_${new Date().toLocaleDateString('sv-SE')}.csv`; a.click();
