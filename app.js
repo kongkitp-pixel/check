@@ -23,6 +23,57 @@ function qrSvg(text, cell = 5) {
   const q = qrcode(0, 'M'); q.addData(text); q.make();
   return q.createSvgTag({ cellSize: cell, margin: 2, scalable: true });
 }
+// วาดบัตร QR ส่วนตัวเป็นรูป PNG แล้วดาวน์โหลด (ชื่อไฟล์: ลำดับ_รหัส_ชื่อ.png)
+function cardBlob(s, no, cid) {
+  return new Promise(resolve => {
+    const q = qrcode(0, 'M'); q.addData(stuLink(cid, s)); q.make();
+    const m = q.getModuleCount(), cell = Math.max(4, Math.floor(460 / (m + 4))), size = cell * (m + 4);
+    const W = Math.max(size + 60, 520), H = size + 190;
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    const g = cv.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#000';
+    const ox = (W - size) / 2 + cell * 2, oy = 24 + cell * 2;
+    for (let r = 0; r < m; r++) for (let c = 0; c < m; c++) if (q.isDark(r, c)) g.fillRect(ox + c * cell, oy + r * cell, cell, cell);
+    g.textAlign = 'center'; const font = 'Tahoma, "Noto Sans Thai", sans-serif';
+    g.font = `bold 32px ${font}`; g.fillText(s.name, W / 2, size + 70);
+    g.font = `26px ${font}`; g.fillText('รหัส ' + s.studentId, W / 2, size + 110);
+    g.fillStyle = '#b00020'; g.font = `22px ${font}`;
+    g.fillText('สแกนด้วยมือถือตัวเองครั้งเดียว (ห้ามส่งต่อ)', W / 2, size + 152);
+    const name = `${String(no).padStart(2, '0')}_${s.studentId}_${s.name.replace(/[\\/:*?"<>|\s]+/g, '_')}.png`;
+    cv.toBlob(b => resolve({ name, blob: b }), 'image/png');
+  });
+}
+function downloadBlob(blob, name) {
+  const a = document.createElement('a'), u = URL.createObjectURL(blob);
+  a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 3000);
+}
+async function saveCard(s, no, cid) { const f = await cardBlob(s, no, cid); downloadBlob(f.blob, f.name); }
+// สร้างไฟล์ ZIP (แบบไม่บีบอัด เพราะ PNG บีบอัดอยู่แล้ว) รวมทุกรูปเป็นไฟล์เดียว
+const CRC_T = (() => { const t = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = u8 => { let c = 0xFFFFFFFF; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+async function makeZip(files) { // files: [{name, blob}]
+  const enc = new TextEncoder(), parts = [], central = []; let off = 0;
+  for (const f of files) {
+    const data = new Uint8Array(await f.blob.arrayBuffer()), nm = enc.encode(f.name), crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(30));
+    h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+    h.setUint16(10, 0, true); h.setUint16(12, 0x21, true); h.setUint32(14, crc, true); h.setUint32(18, data.length, true);
+    h.setUint32(22, data.length, true); h.setUint16(26, nm.length, true); h.setUint16(28, 0, true);
+    parts.push(h.buffer, nm, data);
+    const c = new DataView(new ArrayBuffer(46));
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true);
+    c.setUint16(12, 0, true); c.setUint16(14, 0x21, true); c.setUint32(16, crc, true); c.setUint32(20, data.length, true);
+    c.setUint32(24, data.length, true); c.setUint16(28, nm.length, true); c.setUint32(42, off, true);
+    central.push(c.buffer, nm);
+    off += 30 + nm.length + data.length;
+  }
+  const csize = central.reduce((a, b) => a + (b.byteLength || b.length), 0);
+  const e = new DataView(new ArrayBuffer(22));
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true);
+  e.setUint32(12, csize, true); e.setUint32(16, off, true);
+  return new Blob([...parts, ...central, e.buffer], { type: 'application/zip' });
+}
 const getKey = () => store.sget('att_key') || store.get('att_key') || '';
 
 let pending = 0;
@@ -235,7 +286,9 @@ async function tabClass() {
     <label>เพิ่มนักเรียน (บรรทัดละคน: <code>รหัส,ชื่อ</code> — วางจาก Excel ได้)</label>
     <textarea id="imp" placeholder="10001,สมชาย ใจดี&#10;10002,สมหญิง รักเรียน"></textarea>
     <div class="row" style="margin-top:8px"><div class="auto"><button class="btn" id="impbtn">เพิ่มนักเรียน</button></div>
-    <div class="auto"><button class="btn sec" id="printall">พิมพ์บัตร QR ลิงก์ทุกคน</button></div></div>
+    <div class="auto"><button class="btn sec" id="printall">พิมพ์บัตร QR ลิงก์ทุกคน</button></div>
+    <div class="auto"><button class="btn sec" id="saveimgs">บันทึกรูปบัตร QR (ทีละ 10 รูป)</button></div></div>
+    <div id="imgpanel" style="display:none;margin-top:8px"></div>
     <div class="warnbox">⚠ ลิงก์ส่วนตัวเป็นความลับ ให้ส่งตรงถึงนักเรียนคนนั้นเท่านั้น และให้เปิดในมือถือของตัวเองเครื่องเดียว (เปิดครั้งแรกจะผูกเครื่องทันที)</div></div>` : ''}`;
   $('#csel').onchange = e => { T.cid = e.target.value; render(); };
   $('#cadd').onclick = () => act(async () => { const n = $('#cname').value.trim(); if (!n) return; const j = await api('addClass', { name: n }, true); T.classes.push({ classId: j.classId, name: n, count: 0 }); T.cid = j.classId; render(); });
@@ -244,6 +297,31 @@ async function tabClass() {
   $('#printall').onclick = () => {
     $('#printArea').innerHTML = studs.map(s => `<div class="pcard">${qrSvg(stuLink(cls.classId, s), 4)}<b>${esc(s.name)}</b><br>${esc(s.studentId)}<br>สแกนเพื่อลงทะเบียนมือถือ (ห้ามแชร์)</div>`).join('');
     print(); $('#printArea').innerHTML = '';
+  };
+  $('#saveimgs').onclick = () => {
+    const per = 10, n = Math.ceil(studs.length / per);
+    const p = $('#imgpanel'); p.style.display = 'block';
+    p.innerHTML = `<p><button class="btn" id="zipall">⬇ บันทึกทั้งหมดทีเดียว (ไฟล์ ZIP ${studs.length} รูป)</button></p><p class="muted">หรือกดทีละชุด ชุดละ ${per} รูป (ถ้าเบราว์เซอร์ถามว่าอนุญาตให้ดาวน์โหลดหลายไฟล์ ให้กด "อนุญาต") รูปจะอยู่ในโฟลเดอร์ดาวน์โหลด ชื่อไฟล์ขึ้นต้นด้วยลำดับและรหัสนักเรียน</p>` +
+      Array.from({ length: n }, (_, i) => `<button class="btn sm sec" data-batch="${i}" style="margin:3px">รูปที่ ${i * per + 1}–${Math.min((i + 1) * per, studs.length)}</button>`).join('');
+    $('#zipall').onclick = async e => {
+      const btn = e.target; btn.disabled = true;
+      try {
+        const files = [];
+        for (let k = 0; k < studs.length; k++) { btn.textContent = `กำลังสร้างรูป ${k + 1}/${studs.length}…`; files.push(await cardBlob(studs[k], k + 1, cls.classId)); }
+        btn.textContent = 'กำลังรวมไฟล์…';
+        downloadBlob(await makeZip(files), `qr_cards_${cls.name.replace(/[\\/:*?"<>|\s]+/g, '_')}.zip`);
+        btn.textContent = '✓ ดาวน์โหลดแล้ว (กดซ้ำได้)';
+      } catch (err) { alert('สร้างไฟล์ไม่สำเร็จ: ' + err.message); btn.textContent = '⬇ ลองใหม่'; }
+      btn.disabled = false;
+    };
+    p.querySelectorAll('[data-batch]').forEach(b => b.onclick = async () => {
+      const i = +b.dataset.batch; b.disabled = true;
+      for (let k = i * per; k < Math.min((i + 1) * per, studs.length); k++) {
+        await saveCard(studs[k], k + 1, cls.classId);
+        await new Promise(r => setTimeout(r, 450));
+      }
+      b.disabled = false; b.textContent += ' ✓';
+    });
   };
   const byId = id => studs.find(x => x.studentId === id);
   document.querySelectorAll('[data-link]').forEach(b => b.onclick = () => { const s = byId(b.dataset.link), l = stuLink(cls.classId, s); modal(`<h2>${esc(s.name)}</h2>${qrSvg(l, 5)}<p class="muted">ให้นักเรียนสแกนด้วยมือถือตัวเอง หรือส่งลิงก์นี้ให้เฉพาะคนนี้</p><input readonly value="${esc(l)}" onclick="this.select()">`); });
