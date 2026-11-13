@@ -164,9 +164,14 @@ function meView(token) {
   if (!me) return stuShell('<h1>ยังไม่ได้ลงทะเบียน</h1><p class="muted">กรุณาเปิด <b>ลิงก์ส่วนตัว</b> ที่ครูให้ไว้ก่อน (ครั้งแรกครั้งเดียว) แล้วจึงสแกน QR เช็คชื่อ</p>');
   stuShell(`<h1>${esc(me.name)}</h1><p class="muted">รหัส ${esc(me.studentId)} · มือถือเครื่องนี้ผูกกับคุณแล้ว</p>
     <div id="box"></div>
-    <button class="btn" id="scan" style="width:100%;font-size:18px;padding:14px">📷 สแกน QR เช็คชื่อ</button>
-    <p class="muted">สแกน QR ที่ครูฉายบนจอ · ห้ามให้ผู้อื่นยืมมือถือนี้ไปเช็คชื่อ</p>`);
+    <button class="btn" id="showqr" style="width:100%;font-size:18px;padding:14px">🪪 แสดง QR ของฉัน (ให้ครูสแกน)</button>
+    <p class="muted">ไม่ต้องใช้กล้อง: กดปุ่มนี้แล้วยื่นมือถือให้ครูสแกนด้วยกล้อง เพิ่มความสว่างหน้าจอให้สุด</p>
+    <button class="btn sec" id="scan" style="width:100%;font-size:16px;padding:12px">📷 สแกน QR ของครูเอง</button>
+    <button class="btn sec" id="photo" style="width:100%;font-size:16px;padding:12px;margin-top:8px">📸 ถ่ายรูป QR ของครูแทน (ถ้าเปิดกล้องสดไม่ได้)</button>
+    <p class="muted">ห้ามให้ผู้อื่นยืมมือถือนี้ไปเช็คชื่อ</p>`);
+  $('#showqr').onclick = showMyQr;
   $('#scan').onclick = openScanner;
+  $('#photo').onclick = pickPhoto;
   if (token) { history.replaceState(null, '', location.pathname + '#/me'); doCheckin(token); }
 }
 let posP = null; // อ่านตำแหน่งล่วงหน้าตั้งแต่เปิดกล้อง จะได้ไม่ต้องรอหลังสแกน
@@ -175,13 +180,59 @@ function openScanner() {
   $('#box').innerHTML = '<video id="v" playsinline muted></video><p class="muted" id="hint">เล็งกล้องไปที่ QR บนจอ</p><button class="btn sec" id="cancel">ยกเลิก</button>';
   let busy = false, stop;
   stop = startScanner($('#v'), (text, err) => {
-    if (err) { stop(); return showResult('bad', err); }
+    if (err) { stop(); return showResult('bad', 'เปิดกล้องสดในหน้านี้ไม่ได้', 'ไม่ต้องแก้อะไรที่มือถือ: ใช้ปุ่ม “ถ่ายรูป QR ของครูแทน” หรือกด “แสดง QR ของฉัน” แล้วยื่นให้ครูสแกน'); }
     if (busy) return;
     const m = String(text).match(/#\/c\/([\w.\-]+)/);
     if (!m) { $('#hint') && ($('#hint').textContent = 'นี่ไม่ใช่ QR เช็คชื่อ ลองใหม่'); return; }
     busy = true; stop(); doCheckin(m[1]);
   });
   $('#cancel').onclick = () => { stop(); $('#box').innerHTML = ''; };
+}
+// แสดง QR ส่วนตัวของนักเรียน (เปลี่ยนทุก 20 วินาที) ให้ครูสแกน — นักเรียนไม่ต้องเปิดกล้อง
+async function showMyQr() {
+  const me = getMe(); if (!me) return meView();
+  $('#box').innerHTML = `<div class="res ok" style="text-align:center"><div class="big">${esc(me.name)}</div>
+    <div class="bigqr" id="myqrimg" style="margin:10px auto">กำลังสร้าง QR…</div>
+    <div class="muted">เพิ่มความสว่างหน้าจอให้สุด แล้วยื่นให้ครูสแกน · ห้ามส่งรูปหน้าจอนี้ให้ผู้อื่น</div></div>
+    <button class="btn sec" id="myqrclose">ปิด</button>`;
+  let alive = true, timer = null;
+  const load = async () => {
+    if (!alive || !$('#myqrimg')) { alive = false; clearInterval(timer); return; }
+    try {
+      const j = await api('myqr', { classId: me.classId, studentId: me.studentId, secret: me.secret, dev: getDev() }, false, true);
+      if (alive && $('#myqrimg')) $('#myqrimg').innerHTML = qrSvg('ATTS:' + j.token, 5);
+    } catch (e) { if (alive && $('#myqrimg')) $('#myqrimg').innerHTML = `<div class="res bad">${esc(e.message)}</div>`; }
+  };
+  await load();
+  timer = setInterval(load, 8000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load(); });
+  $('#myqrclose').onclick = () => { alive = false; clearInterval(timer); $('#box').innerHTML = ''; };
+}
+// ถ่ายรูป QR ด้วยแอปกล้องของเครื่อง (ไม่ต้องขอสิทธิ์กล้องในเว็บ) แล้วอ่าน QR จากรูป
+function pickPhoto() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = 'image/*'; inp.setAttribute('capture', 'environment');
+  inp.onchange = () => {
+    const f = inp.files && inp.files[0]; if (!f) return;
+    showResult('warn', 'กำลังอ่านรูป…');
+    const img = new Image(), url = URL.createObjectURL(f);
+    img.onerror = () => { URL.revokeObjectURL(url); showResult('bad', 'เปิดรูปไม่ได้', 'ลองถ่ายใหม่'); };
+    img.onload = () => {
+      let text = null;
+      for (const max of [1000, 700, 1400]) {
+        const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight)), w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k);
+        const c = document.createElement('canvas'); c.width = w; c.height = h;
+        const ctx = c.getContext('2d', { willReadFrequently: true }); ctx.drawImage(img, 0, 0, w, h);
+        const code = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
+        if (code && code.data) { text = code.data; break; }
+      }
+      URL.revokeObjectURL(url);
+      const m = text && String(text).match(/#\/c\/([\w.\-]+)/);
+      if (!m) return showResult('bad', text ? 'นี่ไม่ใช่ QR เช็คชื่อ' : 'อ่าน QR ในรูปไม่เจอ', 'ถ่ายใหม่ให้ QR อยู่เต็มกรอบ ชัด ไม่สะท้อนแสง');
+      posP = getPos(); doCheckin(m[1]);
+    };
+    img.src = url;
+  };
+  inp.click();
 }
 function showResult(kind, big, small = '') {
   const b = $('#box'); if (!b) return;
@@ -237,7 +288,8 @@ async function loadClasses() {
   T.classes = (await api('classes', {}, true)).classes;
   if (!T.cid || !T.classes.find(c => c.classId === T.cid)) T.cid = T.classes[0]?.classId || null;
 }
-function clearTimers() { clearInterval(T.timer); clearInterval(T.tick); T.timer = T.tick = null; }
+let tStop = null;
+function clearTimers() { clearInterval(T.timer); clearInterval(T.tick); T.timer = T.tick = null; if (tStop) { tStop(); tStop = null; } }
 function render() {
   clearTimers();
   const live = store.get('att_sid');
@@ -356,12 +408,43 @@ async function tabCheck() {
     const j = await api('start', data, true); store.set('att_sid', j.sessionId); T.cid = classId; render();
   });
 }
+// โหมดครูสแกน: ใช้กล้อง iPad/โน้ตบุ๊ก สแกน QR ที่นักเรียนแสดงบนมือถือ (บัตรนักเรียนเปลี่ยนทุก 20 วินาที)
+function teacherScan(sid, refresh) {
+  if (tStop) { tStop(); tStop = null; }
+  const box = $('#tscan');
+  box.innerHTML = `<video id="tv" playsinline muted style="width:100%;border-radius:14px;background:#000;aspect-ratio:4/3;object-fit:cover"></video>
+    <div id="tres" style="border-radius:14px;padding:14px;margin:10px 0;text-align:center;font-size:18px;background:#fff6e0;border:1px solid #f1d9a1">เล็งกล้องไปที่ QR บนมือถือนักเรียน<br><small>แต่ละคนใช้เวลาไม่กี่วินาที ดูชื่อที่ขึ้นให้ตรงกับคนที่ยืนอยู่</small></div>
+    <button class="btn sec" id="tclose">ปิดโหมดสแกน</button>`;
+  const show = (kind, big, small = '') => {
+    const r = $('#tres'); if (!r) return;
+    const c = { ok: ['#e9f8f1', '#b7e4d0'], warn: ['#fff6e0', '#f1d9a1'], bad: ['#fdebe8', '#f1b9b2'] }[kind];
+    r.style.background = c[0]; r.style.borderColor = c[1];
+    r.innerHTML = `<b style="font-size:24px">${esc(big)}</b><br>${esc(small)}`;
+  };
+  const beep = ok => { try { if (navigator.vibrate) navigator.vibrate(ok ? 80 : [60, 60, 60]); const A = new (window.AudioContext || window.webkitAudioContext)(), o = A.createOscillator(); o.frequency.value = ok ? 880 : 220; o.connect(A.destination); o.start(); setTimeout(() => { o.stop(); A.close(); }, 120); } catch { } };
+  const seen = {}; let busy = false;
+  tStop = startScanner($('#tv'), async (text, err) => {
+    if (err) return show('bad', 'เปิดกล้องไม่ได้', 'กดอนุญาตการใช้กล้องของเบราว์เซอร์ (ต้องเปิดผ่าน https) แล้วกดโหมดสแกนใหม่');
+    if (!/^ATTS:/.test(text)) return;
+    const now = Date.now(); if (busy || (seen[text] && now - seen[text] < 6000)) return;
+    seen[text] = now; busy = true;
+    try {
+      const j = await api('scan', { sessionId: sid, token: text }, true, true);
+      const st = j.status === 'late' ? 'สาย' : 'มา';
+      show(j.already ? 'warn' : (j.status === 'late' ? 'warn' : 'ok'), (j.already ? 'เช็คไปแล้ว: ' : '✓ ') + j.name, `${j.studentId} · ${st}`);
+      beep(true); refresh();
+    } catch (e) { if (e.auth) { handleErr(e); } else { show('bad', '✗ ' + e.message); beep(false); } }
+    busy = false;
+  });
+  $('#tclose').onclick = () => { if (tStop) tStop(); tStop = null; box.innerHTML = ''; };
+}
 async function liveView(sid) {
   $('#main').innerHTML = `
   <div class="card"><h2 id="ttl">กำลังเช็คชื่อ…</h2>
     <div class="row" style="align-items:flex-start">
       <div style="flex:1 1 360px;min-width:0;text-align:center"><div class="bigqr" id="qr"></div>
-        <div class="bar"><i id="bar" style="width:100%"></i></div><p class="muted">ฉายหน้าจอนี้ให้นักเรียนสแกน · QR เปลี่ยนทุก 20 วินาที</p></div>
+        <div class="bar"><i id="bar" style="width:100%"></i></div><p class="muted">ฉายหน้าจอนี้ให้นักเรียนสแกน · QR เปลี่ยนทุก 20 วินาที</p>
+        <p><button class="btn" id="tscanbtn" style="width:100%;padding:14px;font-size:17px">📷 โหมดครูสแกนบัตรนักเรียน (ไม่ต้องใช้โปรเจ็กเตอร์)</button></p><div id="tscan"></div></div>
       <div style="flex:1 1 300px"><div class="stats" id="stats"></div>
         <h2>การสแกนที่ถูกปฏิเสธ</h2><div id="rej" class="muted">—</div>
         <h2 style="margin-top:14px">บันทึกโดยครู (มือถือเสีย / ลา)</h2>
@@ -388,6 +471,7 @@ async function liveView(sid) {
   await poll();
   T.timer = setInterval(poll, 3000);
   T.tick = setInterval(() => { const l = Math.max(0, left - (Date.now() - t0) / 1000), b = $('#bar'); if (b) b.style.width = (l / win * 100) + '%'; }, 250);
+  $('#tscanbtn').onclick = () => teacherScan(sid, poll);
   $('#mbtn').onclick = () => act(async () => {
     const note = $('#mnote').value.trim(); if (note.length < 3) return alert('กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร');
     if (!$('#mst').value) return;
