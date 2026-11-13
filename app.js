@@ -122,16 +122,28 @@ function getPos(hi = false) { // hi=true สำหรับครูตอนต
 function startScanner(video, onText) {
   let stopped = false, stream = null;
   (async () => {
-    try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }); video.srcObject = stream; await video.play(); }
-    catch { onText(null, 'เปิดกล้องไม่ได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์ (ต้องเปิดผ่าน https)'); return; }
+    try {
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } } }); }
+      catch (e) { stream = await navigator.mediaDevices.getUserMedia({ video: true }); } // เครื่องที่ไม่รองรับกล้องหลัง/ความละเอียดที่ขอ
+      video.srcObject = stream; await video.play();
+    } catch { onText(null, 'เปิดกล้องไม่ได้ กรุณาอนุญาตการใช้กล้องในเบราว์เซอร์ (ต้องเปิดผ่าน https)'); return; }
     const c = document.createElement('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+    let n = 0, last = 0;
+    const tryRead = (sx, sy, sw, sh, w) => {
+      const h = Math.round(w * sh / sw); c.width = w; c.height = h;
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+      const code = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'dontInvert' });
+      return code && code.data ? code.data : null;
+    };
     const loop = () => {
       if (stopped) return;
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
-        const w = 480, h = Math.round(480 * video.videoHeight / video.videoWidth);
-        c.width = w; c.height = h; ctx.drawImage(video, 0, 0, w, h);
-        const code = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'dontInvert' });
-        if (code && code.data) onText(code.data);
+      const now = performance.now();
+      if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth && now - last > 90) {
+        last = now; n++;
+        const vw = video.videoWidth, vh = video.videoHeight;
+        // สลับสองแบบ: ทั้งเฟรม (ละเอียดขึ้น) / ครอปกลางภาพแบบไม่ย่อ (QR เล็กบนหน้าจอมือถือจะคมกว่า)
+        const txt = n % 2 ? tryRead(0, 0, vw, vh, Math.min(vw, 960)) : tryRead(vw * 0.2, vh * 0.2, vw * 0.6, vh * 0.6, Math.min(Math.round(vw * 0.6), 800));
+        if (txt) onText(txt);
       }
       requestAnimationFrame(loop);
     };
@@ -159,16 +171,77 @@ async function studentRegister(classId, studentId, secret) {
     stuShell(`<h1>ผูกเครื่องไม่สำเร็จ</h1><div class="res bad">${esc(e.message)}</div>`);
   }
 }
+// นักเรียนลงทะเบียนเอง: พิมพ์รหัสนักเรียน + ชื่อ-นามสกุล (ครูต้องเปิดรับลงทะเบียนไว้) แล้วระบบล็อกบัญชีกับมือถือเครื่องนี้
+function storageOk() { try { localStorage.setItem('att_t', '1'); const ok = localStorage.getItem('att_t') === '1'; localStorage.removeItem('att_t'); return ok; } catch { return false; } }
+async function joinView(classId) {
+  const me = getMe();
+  if (me && me.classId === classId) {
+    stuShell(`<h1>${esc(me.name)}</h1><div class="res ok"><div class="big">คุณลงทะเบียนแล้ว</div>มือถือเครื่องนี้ผูกกับบัญชีของคุณแล้ว</div>
+      <button class="btn" id="gome" style="width:100%;font-size:18px;padding:14px">ไปหน้าเช็คชื่อ</button>
+      <p class="muted">ถ้าไม่ใช่ชื่อของคุณ ให้แจ้งครูเพื่อรีเซ็ตเครื่อง</p>`);
+    $('#gome').onclick = () => { history.replaceState(null, '', location.pathname + '#/me'); meView(); };
+    return;
+  }
+  stuShell('<h1>กำลังตรวจสอบลิงก์…</h1>');
+  let info;
+  try { info = await api('joinInfo', { classId }); }
+  catch (e) { return stuShell(`<h1>ลงทะเบียนไม่ได้</h1><div class="res bad">${esc(e.message)}</div>`); }
+  if (!info.open) {
+    stuShell(`<h1>${esc(info.className)}</h1><div class="res warn"><div class="big">ตอนนี้ครูยังไม่เปิดรับลงทะเบียน</div>รอครูแจ้งให้ลงทะเบียน แล้วกดปุ่มด้านล่าง</div>
+      <button class="btn" id="again" style="width:100%;font-size:18px;padding:14px">ตรวจสอบอีกครั้ง</button>`);
+    $('#again').onclick = () => joinView(classId);
+    return;
+  }
+  if (!storageOk()) return stuShell('<h1>ลงทะเบียนไม่ได้</h1><div class="res bad">เบราว์เซอร์นี้ไม่ยอมเก็บข้อมูลของเว็บ (อาจเปิดโหมดส่วนตัว/ไม่ระบุตัวตนอยู่) กรุณาเปิดลิงก์นี้ในหน้าต่างปกติของเบราว์เซอร์แล้วลองใหม่</div>');
+  const inp = 'width:100%;font-size:18px;padding:12px;box-sizing:border-box;margin:4px 0 12px';
+  stuShell(`<h1>ลงทะเบียนนักเรียน</h1><p class="muted">${esc(info.className)}</p>
+    <div id="box"></div>
+    <label>รหัสนักเรียน</label><input id="jid" inputmode="numeric" autocomplete="off" placeholder="เช่น 69202010001" style="${inp}">
+    <label>ชื่อ-นามสกุล (ตามรายชื่อของห้อง)</label><input id="jname" autocomplete="off" placeholder="เช่น สมชาย ใจดี" style="${inp}">
+    <button class="btn" id="jgo" style="width:100%;font-size:18px;padding:14px">ลงทะเบียน</button>
+    <div class="warnbox" style="margin-top:14px">⚠ ลงทะเบียนได้ครั้งเดียว ใช้มือถือของตัวเองเท่านั้น ระบบจะล็อกบัญชีนี้ไว้กับมือถือเครื่องนี้ ถ้าเปลี่ยนเครื่องต้องแจ้งครู</div>`);
+  let busy = false;
+  const go = async () => {
+    if (busy) return;
+    const studentId = $('#jid').value.trim(), name = $('#jname').value.trim();
+    if (!studentId || !name) return showResult('bad', 'กรุณากรอกให้ครบทั้งรหัสนักเรียนและชื่อ-นามสกุล');
+    busy = true; $('#jgo').disabled = true; showResult('warn', 'กำลังลงทะเบียน…');
+    try {
+      const j = await api('join', { classId, studentId, name, dev: getDev() });
+      store.set('att_me', JSON.stringify({ classId, studentId: j.studentId, secret: j.secret, name: j.name }));
+      history.replaceState(null, '', location.pathname + '#/me');
+      return meView();
+    } catch (e) {
+      showResult('bad', e.message);
+      busy = false; const b = $('#jgo'); if (b) b.disabled = false;
+    }
+  };
+  $('#jgo').onclick = go;
+  $('#jname').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+}
 function meView(token) {
   const me = getMe();
   if (!me) return stuShell('<h1>ยังไม่ได้ลงทะเบียน</h1><p class="muted">กรุณาเปิด <b>ลิงก์ส่วนตัว</b> ที่ครูให้ไว้ก่อน (ครั้งแรกครั้งเดียว) แล้วจึงสแกน QR เช็คชื่อ</p>');
   stuShell(`<h1>${esc(me.name)}</h1><p class="muted">รหัส ${esc(me.studentId)} · มือถือเครื่องนี้ผูกกับคุณแล้ว</p>
     <div id="box"></div>
-    <button class="btn" id="showqr" style="width:100%;font-size:18px;padding:14px">🪪 แสดง QR ของฉัน (ให้ครูสแกน)</button>
-    <p class="muted">ไม่ต้องใช้กล้อง: กดปุ่มนี้แล้วยื่นมือถือให้ครูสแกนด้วยกล้อง เพิ่มความสว่างหน้าจอให้สุด</p>
-    <button class="btn sec" id="scan" style="width:100%;font-size:16px;padding:12px">📷 สแกน QR ของครูเอง</button>
+    <label style="font-weight:700">รหัสเช็คชื่อ 4 หลัก (ครูอ่านให้ฟัง)</label>
+    <input id="code" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" placeholder="••••" style="width:100%;box-sizing:border-box;font-size:34px;text-align:center;letter-spacing:10px;padding:10px;margin:6px 0 10px">
+    <button class="btn" id="codego" style="width:100%;font-size:20px;padding:14px">✓ ยืนยันเช็คชื่อ</button>
+    <hr style="margin:20px 0;border:0;border-top:1px solid var(--line)">
+    <p class="muted" style="margin-bottom:8px">วิธีอื่น (ถ้าครูไม่ได้ใช้รหัส)</p>
+    <button class="btn sec" id="showqr" style="width:100%;font-size:17px;padding:12px">🪪 แสดง QR ของฉัน (ให้ครูสแกน)</button>
+    <button class="btn sec" id="scan" style="width:100%;font-size:16px;padding:12px;margin-top:8px">📷 สแกน QR ของครูเอง</button>
     <button class="btn sec" id="photo" style="width:100%;font-size:16px;padding:12px;margin-top:8px">📸 ถ่ายรูป QR ของครูแทน (ถ้าเปิดกล้องสดไม่ได้)</button>
     <p class="muted">ห้ามให้ผู้อื่นยืมมือถือนี้ไปเช็คชื่อ</p>`);
+  const codeEl = $('#code');
+  codeEl.addEventListener('input', () => { codeEl.value = codeEl.value.replace(/\D/g, '').slice(0, 4); });
+  codeEl.addEventListener('focus', () => { if (!posP) posP = getPos(); }, { once: true });   // อ่านตำแหน่งล่วงหน้า
+  const sendCode = () => {
+    if (!/^\d{4}$/.test(codeEl.value)) return showResult('bad', 'กรุณาพิมพ์รหัสเช็คชื่อให้ครบ 4 หลัก');
+    doCheckin(null, codeEl.value);
+  };
+  $('#codego').onclick = sendCode;
+  codeEl.addEventListener('keydown', e => { if (e.key === 'Enter') sendCode(); });
   $('#showqr').onclick = showMyQr;
   $('#scan').onclick = openScanner;
   $('#photo').onclick = pickPhoto;
@@ -237,15 +310,16 @@ function pickPhoto() {
 function showResult(kind, big, small = '') {
   const b = $('#box'); if (!b) return;
   b.innerHTML = `<div class="res ${kind}"><div class="big">${esc(big)}</div><div>${esc(small)}</div></div>`;
+  if (b.scrollIntoView) b.scrollIntoView({ block: 'nearest' });
 }
-async function doCheckin(token) {
+async function doCheckin(token, code) {
   const me = getMe();
   if (!me) return meView();
   showResult('warn', 'กำลังตรวจตำแหน่ง…');
   const pos = await (posP || getPos());
   posP = null;
   showResult('warn', 'กำลังบันทึก…');
-  const payload = { token, classId: me.classId, studentId: me.studentId, secret: me.secret, dev: getDev(), lat: pos ? pos.lat : undefined, lng: pos ? pos.lng : undefined, acc: pos ? pos.acc : undefined };
+  const payload = { token, code, classId: me.classId, studentId: me.studentId, secret: me.secret, dev: getDev(), lat: pos ? pos.lat : undefined, lng: pos ? pos.lng : undefined, acc: pos ? pos.acc : undefined };
   let lastErr;
   for (let i = 0; i < 3; i++) { // เซิร์ฟเวอร์คิวหนัก/เน็ตสะดุด: ลองใหม่อัตโนมัติสูงสุด 3 ครั้ง
     try {
@@ -258,7 +332,7 @@ async function doCheckin(token) {
       await new Promise(r => setTimeout(r, 1500 + Math.random() * 2500));
     }
   }
-  showResult('bad', '✗ เช็คชื่อไม่สำเร็จ', lastErr.message + (lastErr.retry ? ' — กรุณากดสแกนใหม่อีกครั้ง' : ''));
+  showResult('bad', '✗ เช็คชื่อไม่สำเร็จ', lastErr.message + (lastErr.retry ? ' — กรุณาลองอีกครั้ง' : ''));
 }
 
 // =====================================================================
@@ -291,7 +365,7 @@ async function loadClasses() {
 let tStop = null;
 function clearTimers() { clearInterval(T.timer); clearInterval(T.tick); T.timer = T.tick = null; if (tStop) { tStop(); tStop = null; } }
 function render() {
-  clearTimers();
+  clearTimers(); T.gen = (T.gen || 0) + 1;
   const live = store.get('att_sid');
   const tabs = [['class', 'ห้องเรียน/นักเรียน'], ['check', 'เช็คชื่อ' + (live ? ' ●' : '')], ['report', 'รายงาน']];
   app.innerHTML = `<header class="top"><span class="brand">เช็คชื่อ QR</span>
@@ -321,32 +395,77 @@ async function act(fn) {
 
 // ----- ห้องเรียน/นักเรียน -----
 async function tabClass() {
+  const gen = T.gen;   // ถ้าครูสลับแท็บระหว่างโหลด ให้เลิกวาดหน้านี้ (กันทับหน้าอื่น)
+  await loadClasses();
   const cls = T.classes.find(c => c.classId === T.cid);
   const studs = cls && cls.count > 0 ? (await api('students', { classId: cls.classId }, true)).students : [];
+  if (gen !== T.gen) return;
+  if (cls) cls.regEnd = Date.now() + (cls.regLeft || 0) * 1000;
+  const joinLink = cls ? `${baseUrl()}#/join/${encodeURIComponent(cls.classId)}` : '';
+  const rowsHtml = () => studs.map(s => `<tr><td>${esc(s.studentId)}</td><td>${esc(s.name)}</td><td>${s.bound ? '<span class="badge ok">ผูกแล้ว</span>' : '<span class="badge">ยังไม่ผูก</span>'}</td>
+      <td style="white-space:nowrap"><button class="btn sm sec" data-link="${esc(s.studentId)}">ลิงก์/QR</button>
+      <button class="btn sm sec" data-rd="${esc(s.studentId)}">รีเซ็ตเครื่อง</button>
+      <button class="btn sm sec" data-rs="${esc(s.studentId)}">รหัสลับใหม่</button>
+      <button class="btn sm red" data-del="${esc(s.studentId)}">ลบ</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">ยังไม่มีนักเรียน</td></tr>';
   $('#main').innerHTML = `
   <div class="card"><h2>ห้องเรียน</h2><div class="row">
     <div><label>เลือกห้อง</label><select id="csel">${T.classes.map(c => `<option value="${esc(c.classId)}" ${c.classId === T.cid ? 'selected' : ''}>${esc(c.name)} (${c.count} คน)</option>`).join('') || '<option>— ยังไม่มีห้อง —</option>'}</select></div>
     <div><label>เพิ่มห้องใหม่</label><input id="cname" placeholder="เช่น ม.4/2 ฟิสิกส์"></div>
     <div class="auto"><button class="btn" id="cadd">เพิ่มห้อง</button></div></div></div>
-  ${cls ? `<div class="card"><h2>นักเรียนใน ${esc(cls.name)}</h2>
-    <div class="tscroll"><table><thead><tr><th>รหัส</th><th>ชื่อ</th><th>เครื่อง</th><th></th></tr></thead><tbody>
-    ${studs.map(s => `<tr><td>${esc(s.studentId)}</td><td>${esc(s.name)}</td><td>${s.bound ? '<span class="badge ok">ผูกแล้ว</span>' : '<span class="badge">ยังไม่ผูก</span>'}</td>
-      <td style="white-space:nowrap"><button class="btn sm sec" data-link="${esc(s.studentId)}">ลิงก์/QR</button>
-      <button class="btn sm sec" data-rd="${esc(s.studentId)}">รีเซ็ตเครื่อง</button>
-      <button class="btn sm sec" data-rs="${esc(s.studentId)}">รหัสลับใหม่</button>
-      <button class="btn sm red" data-del="${esc(s.studentId)}">ลบ</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">ยังไม่มีนักเรียน</td></tr>'}
-    </tbody></table></div>
+  ${cls ? `<div class="card"><h2>ให้นักเรียนลงทะเบียนเอง (พิมพ์รหัส + ชื่อ)</h2>
+    <p class="muted">① ส่งลิงก์นี้เข้ากลุ่มไลน์ &nbsp;② กด “เปิดรับลงทะเบียน” ตอนครูอยู่ในห้อง &nbsp;③ นักเรียนเปิดลิงก์ พิมพ์รหัสนักเรียนและชื่อ-นามสกุลของตัวเอง ระบบล็อกบัญชีไว้กับมือถือเครื่องนั้น &nbsp;④ ดูตารางด้านล่างว่าใครขึ้น “ผูกแล้ว” ถ้ามีคนถูกเพื่อนลงทะเบียนตัดหน้า กด “รีเซ็ตเครื่อง”</p>
+    <div class="row"><div style="flex:1 1 280px"><input id="joinlink" readonly value="${esc(joinLink)}" onclick="this.select()"></div>
+      <div class="auto"><button class="btn sec" id="copyjoin">คัดลอกลิงก์</button></div>
+      <div class="auto"><button class="btn sec" id="joinqr">แสดง QR ลิงก์</button></div></div>
+    <div class="row" style="margin-top:10px"><div class="auto"><button class="btn" id="regopen">เปิดรับลงทะเบียน 10 นาที</button></div>
+      <div class="auto"><button class="btn sec" id="regclose">ปิดรับลงทะเบียน</button></div>
+      <div class="auto"><span id="regstat"></span></div></div>
+    <p style="margin:10px 0 0"><b id="boundcnt"></b></p></div>
+  <div class="card"><h2>นักเรียนใน ${esc(cls.name)}</h2>
+    <div class="tscroll"><table><thead><tr><th>รหัส</th><th>ชื่อ</th><th>เครื่อง</th><th></th></tr></thead><tbody id="stutb">${rowsHtml()}</tbody></table></div>
     <label>เพิ่มนักเรียน (บรรทัดละคน: <code>รหัส,ชื่อ</code> — วางจาก Excel ได้)</label>
     <textarea id="imp" placeholder="10001,สมชาย ใจดี&#10;10002,สมหญิง รักเรียน"></textarea>
     <div class="row" style="margin-top:8px"><div class="auto"><button class="btn" id="impbtn">เพิ่มนักเรียน</button></div>
     <div class="auto"><button class="btn sec" id="printall">พิมพ์บัตร QR ลิงก์ทุกคน</button></div>
     <div class="auto"><button class="btn sec" id="saveimgs">บันทึกรูปบัตร QR (ทีละ 10 รูป)</button></div></div>
     <div id="imgpanel" style="display:none;margin-top:8px"></div>
-    <div class="warnbox">⚠ ลิงก์ส่วนตัวเป็นความลับ ให้ส่งตรงถึงนักเรียนคนนั้นเท่านั้น และให้เปิดในมือถือของตัวเองเครื่องเดียว (เปิดครั้งแรกจะผูกเครื่องทันที)</div></div>` : ''}`;
+    <div class="warnbox">⚠ บัตร/ลิงก์ส่วนตัวรายคน (วิธีเดิม) เป็นความลับ ให้ส่งตรงถึงนักเรียนคนนั้นเท่านั้น ส่วนลิงก์ลงทะเบียนด้านบนเป็นลิงก์กลางของห้อง ส่งในกลุ่มได้</div></div>` : ''}`;
   $('#csel').onchange = e => { T.cid = e.target.value; render(); };
-  $('#cadd').onclick = () => act(async () => { const n = $('#cname').value.trim(); if (!n) return; const j = await api('addClass', { name: n }, true); T.classes.push({ classId: j.classId, name: n, count: 0 }); T.cid = j.classId; render(); });
+  $('#cadd').onclick = () => act(async () => { const n = $('#cname').value.trim(); if (!n) return; const j = await api('addClass', { name: n }, true); T.cid = j.classId; render(); });
   if (!cls) return;
-  $('#impbtn').onclick = () => act(async () => { const j = await api('addStudents', { classId: cls.classId, lines: $('#imp').value }, true); cls.count += j.added; render(); alert(j.added ? `เพิ่ม ${j.added} คน` : 'ไม่มีรายการใหม่ (ตรวจรูปแบบ/รหัสซ้ำ)'); });
+
+  // ----- เปิด/ปิดรับลงทะเบียน + รีเฟรชสถานะ "ผูกแล้ว" อัตโนมัติ -----
+  const updReg = () => {
+    const el = $('#regstat'); if (!el) return;
+    const left = Math.max(0, Math.round((cls.regEnd - Date.now()) / 1000));
+    el.innerHTML = left > 0 ? `<span class="badge ok">เปิดรับลงทะเบียนอยู่ เหลือ ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}</span>` : '<span class="badge">ปิดรับลงทะเบียน</span>';
+  };
+  const updBound = () => { const el = $('#boundcnt'); if (el) el.textContent = `ผูกเครื่องแล้ว ${studs.filter(s => s.bound).length} / ${studs.length} คน`; };
+  const redrawRows = () => { const tb = $('#stutb'); if (!tb) return; tb.innerHTML = rowsHtml(); bindRows(); updBound(); };
+  let refreshing = false, lastOpen = cls.regEnd > Date.now(), ticks = 0;
+  const refresh = async () => {
+    if (refreshing || acting) return; refreshing = true;
+    try { const j = await api('students', { classId: cls.classId }, true, true); studs.splice(0, studs.length, ...j.students); redrawRows(); }
+    catch (e) { if (e.auth) handleErr(e); }
+    refreshing = false;
+  };
+  updReg(); updBound();
+  T.timer = setInterval(() => {
+    updReg(); const open = cls.regEnd > Date.now();
+    if (open && ++ticks % 4 === 0) refresh();
+    if (lastOpen && !open) refresh();
+    lastOpen = open;
+  }, 1000);
+  $('#regopen').onclick = () => act(async () => { const j = await api('regOpen', { classId: cls.classId, minutes: 10 }, true); cls.regEnd = Date.now() + j.regLeft * 1000; updReg(); setTimeout(refresh, 300); });
+  $('#regclose').onclick = () => act(async () => { await api('regOpen', { classId: cls.classId, minutes: 0 }, true); cls.regEnd = 0; updReg(); setTimeout(refresh, 300); });
+  $('#copyjoin').onclick = async () => {
+    const el = $('#joinlink'), b = $('#copyjoin');
+    try { await navigator.clipboard.writeText(el.value); } catch { el.select(); try { document.execCommand('copy'); } catch { } }
+    b.textContent = '✓ คัดลอกแล้ว'; setTimeout(() => { const x = $('#copyjoin'); if (x) x.textContent = 'คัดลอกลิงก์'; }, 2000);
+  };
+  $('#joinqr').onclick = () => modal(`<h2>ลงทะเบียนนักเรียน</h2>${qrSvg(joinLink, 5)}<p class="muted">ให้นักเรียนสแกนด้วยกล้องมือถือ หรือส่งลิงก์ให้ในกลุ่มไลน์</p><input readonly value="${esc(joinLink)}" onclick="this.select()">`);
+
+  $('#impbtn').onclick = () => act(async () => { const j = await api('addStudents', { classId: cls.classId, lines: $('#imp').value }, true); render(); alert(j.added ? `เพิ่ม ${j.added} คน` : 'ไม่มีรายการใหม่ (ตรวจรูปแบบ/รหัสซ้ำ)'); });
   $('#printall').onclick = () => {
     $('#printArea').innerHTML = studs.map(s => `<div class="pcard">${qrSvg(stuLink(cls.classId, s), 4)}<b>${esc(s.name)}</b><br>${esc(s.studentId)}<br>สแกนเพื่อลงทะเบียนมือถือ (ห้ามแชร์)</div>`).join('');
     print(); $('#printArea').innerHTML = '';
@@ -377,10 +496,13 @@ async function tabClass() {
     });
   };
   const byId = id => studs.find(x => x.studentId === id);
-  document.querySelectorAll('[data-link]').forEach(b => b.onclick = () => { const s = byId(b.dataset.link), l = stuLink(cls.classId, s); modal(`<h2>${esc(s.name)}</h2>${qrSvg(l, 5)}<p class="muted">ให้นักเรียนสแกนด้วยมือถือตัวเอง หรือส่งลิงก์นี้ให้เฉพาะคนนี้</p><input readonly value="${esc(l)}" onclick="this.select()">`); });
-  document.querySelectorAll('[data-rd]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rd); if (confirm(`รีเซ็ตเครื่องที่ผูกของ ${s.name}?`)) act(async () => { await api('resetDevice', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
-  document.querySelectorAll('[data-rs]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rs); if (confirm(`สร้างรหัสลับใหม่ให้ ${s.name}? ลิงก์เดิมจะใช้ไม่ได้ทันที`)) act(async () => { await api('newSecret', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
-  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const s = byId(b.dataset.del); if (confirm(`ลบ ${s.name}?`)) act(async () => { await api('delStudent', { classId: cls.classId, studentId: s.studentId }, true); cls.count = Math.max(0, cls.count - 1); render(); }); });
+  function bindRows() {
+    document.querySelectorAll('[data-link]').forEach(b => b.onclick = () => { const s = byId(b.dataset.link), l = stuLink(cls.classId, s); modal(`<h2>${esc(s.name)}</h2>${qrSvg(l, 5)}<p class="muted">ให้นักเรียนสแกนด้วยมือถือตัวเอง หรือส่งลิงก์นี้ให้เฉพาะคนนี้</p><input readonly value="${esc(l)}" onclick="this.select()">`); });
+    document.querySelectorAll('[data-rd]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rd); if (confirm(`รีเซ็ตเครื่องที่ผูกของ ${s.name}?`)) act(async () => { await api('resetDevice', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
+    document.querySelectorAll('[data-rs]').forEach(b => b.onclick = () => { const s = byId(b.dataset.rs); if (confirm(`สร้างรหัสลับใหม่ให้ ${s.name}? ลิงก์เดิมจะใช้ไม่ได้ทันที`)) act(async () => { await api('newSecret', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
+    document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => { const s = byId(b.dataset.del); if (confirm(`ลบ ${s.name}?`)) act(async () => { await api('delStudent', { classId: cls.classId, studentId: s.studentId }, true); render(); }); });
+  }
+  bindRows();
 }
 
 // ----- เช็คชื่อ -----
@@ -391,6 +513,7 @@ async function tabCheck() {
     <div class="row"><div><label>ห้อง</label><select id="scls">${T.classes.map(c => `<option value="${esc(c.classId)}" ${c.classId === T.cid ? 'selected' : ''}>${esc(c.name)} (${c.count} คน)</option>`).join('')}</select></div>
     <div><label>วิชา</label><input id="subj" list="subjlist" placeholder="เลือกหรือพิมพ์ชื่อวิชา" value="${esc(store.get('att_subj') || '')}" autocomplete="off"><datalist id="subjlist">${SUBJECTS.map(x => `<option value="${esc(x)}">`).join('')}</datalist></div>
     <div><label>นับเป็น “สาย” หลังจากกี่นาที</label><input id="late" type="number" min="0" value="10"></div></div>
+    <label style="font-weight:400"><input type="checkbox" id="codeon" style="width:auto" checked> ให้นักเรียนพิมพ์ “รหัสเช็คชื่อ 4 หลัก” ได้ (ครูอ่านรหัสบนจอให้ทั้งห้องฟัง)</label>
     <label style="font-weight:400"><input type="checkbox" id="gps" style="width:auto" checked> ตรวจตำแหน่ง GPS ของนักเรียน (ใช้ตำแหน่งของครูตอนนี้เป็นจุดห้องเรียน)</label>
     <div><label>รัศมีที่ยอมรับ (เมตร)</label><input id="rad" type="number" min="20" value="150"></div>
     <p class="muted">GPS ในอาคารอาจคลาดเคลื่อน แนะนำ 100–200 เมตร</p>
@@ -399,7 +522,7 @@ async function tabCheck() {
     const classId = $('#scls').value; if (!classId) return alert('ยังไม่มีห้อง');
     const subject = $('#subj').value.trim(); if (!subject) return alert('กรุณาเลือกหรือพิมพ์ชื่อวิชาก่อน');
     store.set('att_subj', subject);
-    const data = { classId, subject, lateMin: +$('#late').value || 0 };
+    const data = { classId, subject, codeOn: $('#codeon').checked, lateMin: +$('#late').value || 0 };
     if ($('#gps').checked) {
       $('#go').textContent = 'กำลังอ่านตำแหน่ง…';
       const p = await getPos(true); if (!p) { $('#go').textContent = 'เริ่มเช็คชื่อ'; return alert('อ่านตำแหน่งครูไม่ได้ ตรวจสิทธิ์ตำแหน่งของเบราว์เซอร์ หรือปิดตัวเลือก GPS'); }
@@ -422,10 +545,10 @@ function teacherScan(sid, refresh) {
     r.innerHTML = `<b style="font-size:24px">${esc(big)}</b><br>${esc(small)}`;
   };
   const beep = ok => { try { if (navigator.vibrate) navigator.vibrate(ok ? 80 : [60, 60, 60]); const A = new (window.AudioContext || window.webkitAudioContext)(), o = A.createOscillator(); o.frequency.value = ok ? 880 : 220; o.connect(A.destination); o.start(); setTimeout(() => { o.stop(); A.close(); }, 120); } catch { } };
-  const seen = {}; let busy = false;
+  const seen = {}; let busy = false, lastMsg = 0;
   tStop = startScanner($('#tv'), async (text, err) => {
     if (err) return show('bad', 'เปิดกล้องไม่ได้', 'กดอนุญาตการใช้กล้องของเบราว์เซอร์ (ต้องเปิดผ่าน https) แล้วกดโหมดสแกนใหม่');
-    if (!/^ATTS:/.test(text)) return;
+    if (!/^ATTS:/.test(text)) { const t0 = Date.now(); if (t0 - lastMsg > 2500) { lastMsg = t0; show('warn', 'เห็น QR แล้ว แต่ไม่ใช่บัตรเช็คชื่อของนักเรียน', 'ให้นักเรียนกดปุ่ม “แสดง QR ของฉัน” ในหน้าเว็บ (ไม่ใช่รูปบัตรที่ครูส่งให้)'); } return; }
     const now = Date.now(); if (busy || (seen[text] && now - seen[text] < 6000)) return;
     seen[text] = now; busy = true;
     try {
@@ -442,7 +565,10 @@ async function liveView(sid) {
   $('#main').innerHTML = `
   <div class="card"><h2 id="ttl">กำลังเช็คชื่อ…</h2>
     <div class="row" style="align-items:flex-start">
-      <div style="flex:1 1 360px;min-width:0;text-align:center"><div class="bigqr" id="qr"></div>
+      <div style="flex:1 1 360px;min-width:0;text-align:center">
+        <div id="codebox" style="display:none;margin:0 0 14px;padding:12px;border:2px solid var(--line);border-radius:14px"><div class="muted">รหัสเช็คชื่อ — อ่านให้นักเรียนฟัง แล้วให้พิมพ์ในหน้าเว็บของตัวเอง</div>
+          <div id="codeval" style="font-size:72px;font-weight:700;letter-spacing:14px;line-height:1.1">----</div><div class="muted" id="codeleft"></div></div>
+        <div class="bigqr" id="qr"></div>
         <div class="bar"><i id="bar" style="width:100%"></i></div><p class="muted">ฉายหน้าจอนี้ให้นักเรียนสแกน · QR เปลี่ยนทุก 20 วินาที</p>
         <p><button class="btn" id="tscanbtn" style="width:100%;padding:14px;font-size:17px">📷 โหมดครูสแกนบัตรนักเรียน (ไม่ต้องใช้โปรเจ็กเตอร์)</button></p><div id="tscan"></div></div>
       <div style="flex:1 1 300px"><div class="stats" id="stats"></div>
@@ -453,13 +579,14 @@ async function liveView(sid) {
         <p><button class="btn sec" id="mbtn">บันทึก</button></p></div></div></div>
   <div class="card"><h2>รายการที่เช็คแล้ว</h2><div class="tscroll"><table><tbody id="rec"></tbody></table></div>
     <p><button class="btn red" id="close">ปิดรอบเช็คชื่อ</button></p></div>`;
-  let lastToken = null, left = 20, t0 = Date.now(), sig = '', win = 20;
+  let lastToken = null, left = 20, t0 = Date.now(), sig = '', win = 20, codeLeft = 0;
   const lab = { present: ['มา', 'ok'], late: ['สาย', 'warn'], leave: ['ลา', ''] };
   const update = j => {
     if (j.status !== 'open') { store.del('att_sid'); T.tab = 'report'; return render(); }
     $('#ttl').innerHTML = `${esc(j.className)}${j.subject ? ' · ' + esc(j.subject) : ''} <span class="badge ok">เปิดอยู่</span> <span class="muted">เริ่ม ${timeStr(j.start)} · สายหลัง ${j.lateMin} นาที · GPS ${j.gps ? 'เปิด' : 'ปิด'}</span>`;
     if (j.token !== lastToken) { lastToken = j.token; $('#qr').innerHTML = qrSvg(`${baseUrl()}#/c/${j.token}`, 5); }
     left = j.secondsLeft; win = j.windowSec; t0 = Date.now();
+    const cb = $('#codebox'); if (cb) { if (j.codeOn && j.code) { cb.style.display = 'block'; $('#codeval').textContent = j.code; codeLeft = j.codeLeft; } else cb.style.display = 'none'; }
     const c = k => j.records.filter(r => r.status === k).length;
     $('#stats').innerHTML = `<div class="stat"><b>${c('present')}</b>มา</div><div class="stat"><b>${c('late')}</b>สาย</div><div class="stat"><b>${c('leave')}</b>ลา</div><div class="stat"><b>${j.roster.length - j.records.length}</b>ยังไม่เช็ค</div>`;
     $('#rej').innerHTML = j.rejects.length ? j.rejects.map(x => `<div>${timeStr(x.ts)} — ${esc(x.detail)}</div>`).join('') : '—';
@@ -470,7 +597,10 @@ async function liveView(sid) {
   const poll = async () => { try { update(await api('poll', { sessionId: sid }, true, true)); } catch (e) { if (e.auth) return handleErr(e); if (/ไม่พบรอบ/.test(e.message)) { store.del('att_sid'); return render(); } const m = $('#ttl'); if (m) m.innerHTML += ` <span class="badge bad">เชื่อมต่อขัดข้อง: ${esc(e.message)}</span>`; } };
   await poll();
   T.timer = setInterval(poll, 3000);
-  T.tick = setInterval(() => { const l = Math.max(0, left - (Date.now() - t0) / 1000), b = $('#bar'); if (b) b.style.width = (l / win * 100) + '%'; }, 250);
+  T.tick = setInterval(() => {
+    const dt = (Date.now() - t0) / 1000, l = Math.max(0, left - dt), b = $('#bar'); if (b) b.style.width = (l / win * 100) + '%';
+    const cl = $('#codeleft'); if (cl) { const c = Math.ceil(codeLeft - dt); cl.textContent = c > 0 ? `รหัสนี้เปลี่ยนใน ${c} วินาที (รหัสก่อนหน้ายังใช้ได้อีกประมาณ 1 นาที)` : 'กำลังเปลี่ยนรหัส…'; }
+  }, 250);
   $('#tscanbtn').onclick = () => teacherScan(sid, poll);
   $('#mbtn').onclick = () => act(async () => {
     const note = $('#mnote').value.trim(); if (note.length < 3) return alert('กรุณาระบุเหตุผลอย่างน้อย 3 ตัวอักษร');
@@ -519,6 +649,7 @@ async function tabReport() {
   let m;
   if ((m = h.match(/^#\/s\/([^/]+)\/([^/]+)\/([^/]+)$/))) studentRegister(...m.slice(1).map(decodeURIComponent));
   else if ((m = h.match(/^#\/c\/([\w.\-]+)$/))) meView(m[1]);
+  else if ((m = h.match(/^#\/join\/([^/]+)$/))) joinView(decodeURIComponent(m[1]));
   else if (h === '#/me') meView();
   else teacherApp();
   addEventListener('hashchange', () => location.reload());
